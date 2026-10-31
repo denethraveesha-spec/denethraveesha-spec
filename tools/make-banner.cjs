@@ -1,334 +1,225 @@
 const fs = require("fs");
 const path = require("path");
-const opentype = require("opentype.js");
+const fontkit = require("fontkit");
+const { decompress } = require("wawoff2");
 
-const out = process.argv[2] || path.join(__dirname, "..", "assets", "banner.svg");
+const out = process.argv.find(a => a.endsWith(".svg")) || path.join(__dirname, "..", "assets", "banner.svg");
+const withPhoto = !process.argv.includes("--no-photo");
 
-const load = (pkg, file) => {
-  const dir = path.dirname(require.resolve(`@fontsource/${pkg}/package.json`));
-  const buf = fs.readFileSync(path.join(dir, "files", file));
-  return opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-};
-const F = {
-  black: load("schibsted-grotesk", "schibsted-grotesk-latin-800-normal.woff"),
-  bold: load("schibsted-grotesk", "schibsted-grotesk-latin-700-normal.woff"),
-  semi: load("schibsted-grotesk", "schibsted-grotesk-latin-600-normal.woff"),
-  med: load("schibsted-grotesk", "schibsted-grotesk-latin-500-normal.woff"),
-  mono: load("jetbrains-mono", "jetbrains-mono-latin-500-normal.woff"),
-};
-
+const W = 1200;
+const H = 400;
+const M = 56;
 const C = {
-  paper: "#f4efe6",
-  edge: "#e2dacb",
-  ink: "#16181d",
-  station: "#ffffff",
-  platforms: "#8d153a",
-  commerce: "#eb7400",
-  tools: "#00534e",
+  bg: "#0a0a0b",
+  edge: "#1f1f23",
+  text: "#f3f1ed",
+  muted: "#a5a3a0",
+  red: "#d0141f",
+  hot: "#ff2b38",
 };
+const ease = "cubic-bezier(.2,.7,.2,1)";
 
-function layout(f, str, size, tracking) {
-  const glyphs = f.stringToGlyphs(str);
-  const scale = size / f.unitsPerEm;
+const file = (pkg, name) => path.join(path.dirname(require.resolve(`${pkg}/package.json`)), "files", name);
+const round = d => d.replace(/-?\d*\.\d+/g, n => String(Math.round(n * 10) / 10));
+const sec = n => `${Math.round(n * 1000) / 1000}s`;
+
+function random(seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function layout(font, str, size, tracking = 0) {
+  const { glyphs, positions } = font.layout(str);
+  const s = size / font.unitsPerEm;
   const xs = [];
   let x = 0;
   glyphs.forEach((g, i) => {
-    xs.push(x);
-    x += g.advanceWidth * scale;
-    if (i < glyphs.length - 1) x += f.getKerningValue(g, glyphs[i + 1]) * scale + tracking;
+    xs.push(x + positions[i].xOffset * s);
+    x += positions[i].xAdvance * s;
+    if (i < glyphs.length - 1) x += tracking * size;
   });
-  return { glyphs, xs, width: x };
+  return { glyphs, xs, s, advances: positions.map(p => p.xAdvance * s), width: x };
 }
 
-const measure = (f, str, size, tracking = 0) => layout(f, str, size, tracking).width;
+const outline = (g, x, y, s, sy = 1) => round(g.path.scale(s, -s * sy).translate(x, y).toSVG());
 
-function text(f, str, x, y, size, { tracking = 0, anchor = "start", opacity, fill } = {}) {
-  const { glyphs, xs, width } = layout(f, str, size, tracking);
-  const x0 = anchor === "middle" ? x - width / 2 : anchor === "end" ? x - width : x;
-  const d = glyphs.map((g, i) => g.getPath(x0 + xs[i], y, size).toPathData(2)).join("");
-  const attrs = (fill ? ` fill="${fill}"` : "") + (opacity ? ` fill-opacity="${opacity}"` : "");
-  return { svg: `<path${attrs} d="${d}"/>`, x0, x1: x0 + width };
+function text(font, str, x, y, size, { tracking = 0, anchor = "start" } = {}) {
+  const t = layout(font, str, size, tracking);
+  const x0 = anchor === "middle" ? x - t.width / 2 : anchor === "end" ? x - t.width : x;
+  return { d: t.glyphs.map((g, i) => outline(g, x0 + t.xs[i], y, t.s)).join(""), x0, x1: x0 + t.width };
 }
 
-function sample(d) {
-  const tokens = d.match(/[MLHVQ]|-?[\d.]+/g);
-  const pts = [];
-  let i = 0, x = 0, y = 0, s = 0, cmd;
-  const num = () => parseFloat(tokens[i++]);
-  const step = (nx, ny) => {
-    s += Math.hypot(nx - x, ny - y);
-    x = nx;
-    y = ny;
-    pts.push({ x, y, s });
+async function main() {
+  const archivo = fontkit.create(
+    Buffer.from(await decompress(fs.readFileSync(file("@fontsource-variable/archivo", "archivo-latin-wdth-normal.woff2"))))
+  );
+  const mono = fontkit.openSync(file("@fontsource/jetbrains-mono", "jetbrains-mono-latin-500-normal.woff"));
+  const faces = new Map();
+  const face = (wdth, wght) => {
+    const key = `${wdth}/${wght}`;
+    if (!faces.has(key)) faces.set(key, archivo.getVariation({ wdth, wght }));
+    return faces.get(key);
   };
-  const line = (nx, ny) => {
-    const n = Math.max(1, Math.ceil(Math.hypot(nx - x, ny - y)));
-    const [x0, y0] = [x, y];
-    for (let k = 1; k <= n; k++) step(x0 + ((nx - x0) * k) / n, y0 + ((ny - y0) * k) / n);
+
+  const giant = {
+    words: ["DEVELOPER", "FULL-STACK", "BUILDER"],
+    room: W - 72,
+    top: 30,
+    sy: 1.6,
+    step: 3.6,
+    start: 0.15,
+    stagger: 0.055,
+    flicker: 0.09,
+    flickers: 3,
+    noise: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&/+=<>*",
   };
-  while (i < tokens.length) {
-    if (/[MLHVQ]/.test(tokens[i])) cmd = tokens[i++];
-    if (cmd === "M") {
-      x = num();
-      y = num();
-      pts.push({ x, y, s });
-    } else if (cmd === "L") line(num(), num());
-    else if (cmd === "H") line(num(), y);
-    else if (cmd === "V") line(x, num());
-    else if (cmd === "Q") {
-      const [cx, cy, ex, ey] = [num(), num(), num(), num()];
-      const [x0, y0] = [x, y];
-      for (let k = 1; k <= 200; k++) {
-        const t = k / 200, u = 1 - t;
-        step(u * u * x0 + 2 * u * t * cx + t * t * ex, u * u * y0 + 2 * u * t * cy + t * t * ey);
-      }
+  const MIN = 62;
+  const MAX = 125;
+  const widthAt = (word, wdth, size) => layout(face(wdth, 900), word, size, -0.004).width;
+  const size = Math.min(...giant.words.map(w => (giant.room / widthAt(w, MIN, 100)) * 100));
+  const fit = word => {
+    let lo = MIN;
+    let hi = MAX;
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2;
+      if (widthAt(word, mid, size) > giant.room) hi = mid;
+      else lo = mid;
     }
-  }
-  return pts;
-}
-const distanceTo = (pts, x, y) =>
-  pts.reduce((best, p) => (Math.hypot(p.x - x, p.y - y) < Math.hypot(best.x - x, best.y - y) ? p : best)).s;
-
-const M = 56;
-const tag = { size: 9.5, tracking: 1.1, opacity: 0.62 };
-const sec = n => `${n.toFixed(2)}s`;
-const delayed = (cls, at, inner) => `<g class="a ${cls}" style="animation-delay:${sec(at)}">${inner}</g>`;
-
-function typed(f, str, x, y, size, { tracking = 0, start, speed }) {
-  const { glyphs, xs, width } = layout(f, str, size, tracking);
-  const scale = size / f.unitsPerEm;
-  const stops = [{ t: start, x }];
-  let t = start;
-  const svg = glyphs
-    .map((g, i) => {
-      t += speed * (1 + 0.35 * Math.sin(i * 2.7)) + (g.unicode === 32 ? speed * 0.8 : 0);
-      t = Math.round(t * 100) / 100;
-      stops.push({ t, x: x + xs[i] + g.advanceWidth * scale + 3 });
-      const d = g.getPath(x + xs[i], y, size).toPathData(2);
-      return d ? `<path class="key" style="animation-delay:${sec(t)}" d="${d}"/>` : "";
+    return Math.round(lo * 10) / 10;
+  };
+  const cap = face(MIN, 900).glyphForCodePoint(72).bbox.maxY * (size / 1000) * giant.sy;
+  const baseline = giant.top + cap;
+  const cycle = giant.step * giant.words.length;
+  const pct = t => `${((t / cycle) * 100).toFixed(3)}%`;
+  const rand = random(404);
+  const windows = new Map();
+  const frame = on => {
+    const name = `f${Math.round(on * 1000)}`;
+    windows.set(name, `@keyframes ${name}{0%{opacity:1}${pct(on)}{opacity:0}100%{opacity:0}}`);
+    return name;
+  };
+  const flash = frame(giant.flicker);
+  const wdths = {};
+  const sets = giant.words.map(word => {
+    const wdth = (wdths[word] = fit(word));
+    const f = face(wdth, 900);
+    const t = layout(f, word, size, -0.004);
+    return { f, t, x0: W / 2 - t.width / 2 };
+  });
+  const sweep = (k, x) => {
+    const { t, x0 } = sets[k % sets.length];
+    const reach = Math.min(1, Math.max(0, (x - x0) / t.width));
+    return reach * (t.glyphs.length - 1) * giant.stagger;
+  };
+  const words = sets
+    .map(({ f, t, x0 }, k) => {
+      const begin = giant.start + k * giant.step;
+      const parts = t.glyphs.map((g, i) => {
+        const center = x0 + t.xs[i] + t.advances[i] / 2;
+        const at = begin + i * giant.stagger;
+        const noise = Array.from({ length: giant.flickers }, (_, j) => {
+          const ch = giant.noise[Math.floor(rand() * giant.noise.length)];
+          const n = layout(f, ch, size);
+          const d = outline(n.glyphs[0], center - n.advances[0] / 2, baseline, n.s, giant.sy);
+          return `<path class="n" style="animation-name:${flash};animation-delay:${sec(at + j * giant.flicker)}" d="${d}"/>`;
+        });
+        const settle = at + giant.flickers * giant.flicker;
+        const leave = begin + giant.step + Math.max(0, sweep(k + 1, x0 + t.xs[i]) - giant.stagger);
+        const final = `<path class="f" style="animation-name:${frame(Math.round((leave - settle) * 100) / 100)};animation-delay:${sec(settle)}" d="${outline(g, x0 + t.xs[i], baseline, t.s, giant.sy)}"/>`;
+        return noise.join("") + final;
+      });
+      return `<g class="w${k}">${parts.join("")}</g>`;
     })
-    .join("");
-  return { svg, stops, end: t, x0: x, x1: x + width };
-}
+    .join("\n");
 
-const O = { x: 716, y: 198 };
-const E = { x: 1104, y: 198 };
-const Y = { platforms: 118, commerce: 198, tools: 278 };
+  const name = { size: 72, wdth: 70, wght: 860, y2: 261 };
+  name.y1 = name.y2 - Math.round(name.size * 0.84);
+  const nameFace = face(name.wdth, name.wght);
+  const nameCap = nameFace.glyphForCodePoint(72).bbox.maxY * (name.size / 1000);
+  const lines = ["DENETH", "RAVEESHA"].map((word, i) => {
+    const y = i ? name.y2 : name.y1;
+    const t = text(nameFace, word, M - 3, y, name.size, { tracking: -0.004 });
+    return (
+      `<clipPath id="line${i}"><rect x="0" y="${(y - nameCap - 8).toFixed(1)}" width="${W / 2}" height="${(nameCap + 16).toFixed(1)}"/></clipPath>` +
+      `<g clip-path="url(#line${i})"><g class="a line" style="animation-delay:${sec(0.4 + i * 0.1)}"><path d="${t.d}"/></g></g>`
+    );
+  });
 
-const routes = {
-  platforms: `M${O.x} ${O.y}L${O.x + 80} ${Y.platforms}H${E.x - 20}Q${E.x} ${Y.platforms} ${E.x} ${Y.platforms + 20}V${E.y}`,
-  commerce: `M${O.x} ${O.y}H${E.x}`,
-  tools: `M${O.x} ${O.y}L${O.x + 80} ${Y.tools}H${E.x - 20}Q${E.x} ${Y.tools} ${E.x} ${Y.tools - 20}V${E.y}`,
-};
-const stations = [
-  { route: "platforms", x: 860, name: "BizUpward", tag: "LIVE", side: "above" },
-  { route: "platforms", x: 1000, name: "REM Nexus", tag: "LIVE · CLIENT", side: "above" },
-  { route: "commerce", x: 848, name: "WingZ Topup", tag: "LIVE", side: "above" },
-  { route: "commerce", x: 980, name: "Fulfilment API", tag: "IN-HOUSE", side: "above" },
-  { route: "tools", x: 860, name: "VPS Manager", tag: "IN-HOUSE", side: "below" },
-  { route: "tools", x: 1000, name: "Zipizy", tag: "OPEN SOURCE", side: "below" },
-];
-
-const T = {
-  kicker: 0.1,
-  caret: 0.3,
-  typeName: 0.55,
-  origin: 1.5,
-  draw: { commerce: 1.75, platforms: 1.85, tools: 1.95 },
-  drawFor: 1.9,
-  legend: 4.1,
-  cue: 4.4,
-};
-const arrival = Math.max(...Object.values(T.draw)) + T.drawFor;
-const trains = { platforms: arrival + 0.5, commerce: arrival + 1.4, tools: arrival + 2.3 };
-const train = { speed: 105, dwell: 0.8, rest: 1.2 };
-
-const sampled = Object.fromEntries(Object.entries(routes).map(([k, d]) => [k, sample(d)]));
-for (const st of stations) {
-  st.y = Y[st.route];
-  const pts = sampled[st.route];
-  st.along = distanceTo(pts, st.x, st.y) / pts.at(-1).s;
-  st.at = T.draw[st.route] + st.along * T.drawFor - 0.04;
-}
-
-const parts = [];
-const boxes = [];
-const box = (t, y0, y1, name) => (boxes.push({ name, x0: t.x0, x1: t.x1, y0, y1 }), t);
-
-parts.push(delayed("fade", T.kicker, box(text(F.mono, "BASED IN SRI LANKA", M, 104, 10.5, { tracking: 1.5, opacity: 0.62 }), 96, 104, "kicker").svg));
-
-const track = s => -0.025 * s;
-const S = Math.min(64, Math.floor((100 * 580) / measure(F.black, "Deneth Raveesha", 100, track(100))));
-const nameY = 166, roleY = 208;
-const nameTyped = box(typed(F.black, "Deneth Raveesha", M - 2, nameY, S, { tracking: track(S), start: T.typeName, speed: 0.06 }), nameY - S * 0.74, nameY, "name");
-const roleTyped = box(typed(F.semi, "Full-stack Developer", M, roleY, 26, { tracking: -0.3, start: nameTyped.end + 0.35, speed: 0.045 }), roleY - 19, roleY, "role");
-parts.push(nameTyped.svg, roleTyped.svg);
-
-const caret = { name: { w: 4, h: S * 0.8, base: nameY + 6 }, role: { w: 2.5, h: 22.8, base: roleY + 4 } };
-const caretSpan = roleTyped.end - T.caret;
-const at = t => `${(((t - T.caret) / caretSpan) * 100).toFixed(3)}%`;
-const pose = (x, c) => `transform:translate(${x.toFixed(1)}px,${c.base.toFixed(1)}px) scale(${c.w},${c.h.toFixed(1)})`;
-const caretFrames = [
-  `0%{opacity:0;${pose(nameTyped.stops[0].x, caret.name)}}`,
-  `0.5%{opacity:1;${pose(nameTyped.stops[0].x, caret.name)}}`,
-  ...nameTyped.stops.slice(1).map(s => `${at(s.t)}{${pose(s.x, caret.name)}}`),
-  `${at(roleTyped.stops[0].t)}{${pose(roleTyped.stops[0].x, caret.role)}}`,
-  ...roleTyped.stops.slice(1, -1).map(s => `${at(s.t)}{${pose(s.x, caret.role)}}`),
-  `100%{opacity:1;${pose(roleTyped.stops.at(-1).x, caret.role)}}`,
-];
-parts.push(
-  `<g class="caret" style="animation-delay:${sec(T.caret)};animation-duration:${sec(caretSpan)}">` +
-    `<rect class="blink" x="0" y="-1" width="1" height="1" fill="${C.commerce}" style="animation-delay:${sec(roleTyped.end)}"/></g>`
-);
-
-const about = ["I design and build complete web products,", "from the interface to the servers they run on."];
-parts.push(
-  delayed("fade", roleTyped.end + 0.15, about.map((l, i) => box(text(F.med, l, M, 246 + i * 23, 16, { opacity: 0.7 }), 234 + i * 23, 246 + i * 23, "about" + i).svg).join(""))
-);
-
-const cueA = box(text(F.med, "Every station is a real system I built.", M, 348, 14, { opacity: 0.7 }), 337, 348, "cue");
-const cueB = box(text(F.semi, "Scroll down to ride along", cueA.x1 + 5, 348, 14), 337, 348, "cue-cta");
-const ax = cueB.x1 + 11;
-const arrow = `<g class="bob"><path d="M${ax.toFixed(1)} 337.5V347.5M${(ax - 3.6).toFixed(1)} 343.9L${ax.toFixed(1)} 347.5L${(ax + 3.6).toFixed(1)} 343.9" fill="none" stroke="${C.ink}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></g>`;
-parts.push(delayed("fade", T.cue, cueA.svg + cueB.svg + arrow));
-
-for (const [k, d] of Object.entries(routes)) {
-  parts.push(
-    `<path class="a draw" pathLength="1" d="${d}" fill="none" stroke="${C[k]}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" style="animation-delay:${sec(T.draw[k])};animation-duration:${sec(T.drawFor)}"/>`
+  const intro = (i, inner) => `<g class="a rise" style="animation-delay:${sec(0.45 + i * 0.07)}">${inner}</g>`;
+  const labelY = name.y2 + 33;
+  const label = text(face(112, 600), "FULL-STACK DEVELOPER", M, labelY, 11.5, { tracking: 0.24 });
+  const ruleY = labelY + 18;
+  const tagline = ["From idea to interface.", "From code to the server it runs on."].map((l, i) =>
+    text(face(100, 300), l, M, ruleY + 34 + i * 23, 17.5)
   );
-}
-for (const st of stations) {
-  parts.push(`<circle class="a pop" cx="${st.x}" cy="${st.y}" r="8" fill="${C.station}" stroke="${C.ink}" stroke-width="3.5" style="animation-delay:${sec(st.at)}"/>`);
-}
 
-const f4 = n => +n.toFixed(4);
-for (const [k, d] of Object.entries(routes)) {
-  const len = sampled[k].at(-1).s;
-  const stops = stations.filter(st => st.route === k).map(st => st.along * len).sort((a, b) => a - b);
-  const kp = [0], kt = [0];
-  let t = 0, prev = 0;
-  for (const s of stops) {
-    t += (s - prev) / train.speed;
-    kp.push(s / len, s / len);
-    kt.push(t, t + train.dwell);
-    t += train.dwell;
-    prev = s;
-  }
-  t += (len - prev) / train.speed;
-  kp.push(1, 1);
-  kt.push(t, t + train.rest);
-  const dur = t + train.rest;
-  parts.push(
-    `<g class="train" opacity="0"><set attributeName="opacity" to="1" begin="${sec(trains[k])}" fill="freeze"/>` +
-      `<rect x="-9.5" y="-4.75" width="19" height="9.5" rx="4.75" fill="${C.station}" stroke="${C.ink}" stroke-width="2.5"/>` +
-      `<animateMotion begin="${sec(trains[k])}" dur="${sec(dur)}" repeatCount="indefinite" rotate="auto" calcMode="linear" ` +
-      `keyPoints="${kp.map(f4).join(";")}" keyTimes="${kt.map(x => f4(x / dur)).join(";")}" path="${d}"/></g>`
-  );
-}
+  const whereFace = face(112, 650);
+  const where = ["BASED IN", "SRI LANKA"];
+  const whereW = Math.max(...where.map(l => layout(whereFace, l, 10.9, 0.22).width));
+  const whereX = W - M - whereW;
+  const whereY = 318;
+  const whereText = where.map((l, i) => text(whereFace, l, whereX, whereY + i * 17.5, 10.9, { tracking: 0.22 }).d).join("");
+  const time = text(mono, "GMT+5:30", whereX, whereY + 41, 11.2, { tracking: 0.04 });
+  const pin = `<g transform="translate(${(whereX - 34).toFixed(1)} ${whereY - 15}) scale(.84)" fill="none" stroke="${C.hot}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.4"/></g>`;
 
-parts.push(`<circle class="ripple" cx="${O.x}" cy="${O.y}" r="24" fill="none" stroke="${C.ink}" stroke-width="2" style="animation-delay:${sec(T.origin + 0.15)}"/>`);
-parts.push(
-  delayed(
-    "pop",
-    T.origin,
-    `<circle cx="${O.x}" cy="${O.y}" r="24" fill="${C.ink}"/>` + text(F.bold, "DR", O.x, O.y + 6, 16, { anchor: "middle", tracking: 0.4, fill: C.paper }).svg
-  )
-);
+  const ph = 380;
+  const pw = Math.round(ph * (936 / 1015));
+  const portrait = withPhoto
+    ? `<g class="a photo"><image href="data:image/webp;base64,${fs.readFileSync(path.join(__dirname, "..", "assets", "portrait.webp")).toString("base64")}" x="${Math.round(W * 0.56 - ph * 0.3)}" y="${H - ph}" width="${pw}" height="${ph}" preserveAspectRatio="xMidYMax meet"/></g>`
+    : "";
 
-parts.push(
-  delayed(
-    "pop",
-    arrival,
-    `<g class="spin"><circle cx="${E.x}" cy="${E.y}" r="17" fill="${C.paper}" stroke="${C.ink}" stroke-width="3.5" stroke-dasharray="5.2 4.2"/></g>` +
-      `<g class="pulse"><path d="M${E.x - 6} ${E.y}H${E.x + 6}M${E.x} ${E.y - 6}V${E.y + 6}" stroke="${C.ink}" stroke-width="2.6" stroke-linecap="round"/></g>`
-  )
-);
-
-for (const st of stations) {
-  const nameY = st.side === "above" ? st.y - 20 : st.y + 30;
-  const tagY = st.side === "above" ? st.y - 36 : st.y + 46;
-  const name = box(text(F.semi, st.name, st.x, nameY, 15, { anchor: "middle", tracking: -0.1 }), nameY - 11, nameY, st.name);
-  let label;
-  if (st.tag.startsWith("LIVE")) {
-    const w = measure(F.mono, st.tag, tag.size, tag.tracking);
-    const x0 = st.x - (w + 10.4) / 2;
-    const t = box(text(F.mono, st.tag, x0 + 10.4, tagY, tag.size, { tracking: tag.tracking, opacity: tag.opacity }), tagY - 7, tagY, st.tag + " @ " + st.name);
-    const dot = { x: (x0 + 2.6).toFixed(1), y: (tagY - 3.4).toFixed(1) };
-    label =
-      `<circle class="ping" cx="${dot.x}" cy="${dot.y}" r="2.6" fill="${C.tools}"/>` +
-      `<circle cx="${dot.x}" cy="${dot.y}" r="2.6" fill="${C.tools}"/>` +
-      t.svg;
-  } else {
-    label = box(text(F.mono, st.tag, st.x, tagY, tag.size, { anchor: "middle", tracking: tag.tracking, opacity: tag.opacity }), tagY - 7, tagY, st.tag + " @ " + st.name).svg;
-  }
-  parts.push(delayed("fade", st.at + 0.15, name.svg + label));
-}
-parts.push(
-  delayed(
-    "fade",
-    arrival + 0.2,
-    box(text(F.semi, "Your project?", E.x - 30, E.y + 32, 15, { anchor: "end", tracking: -0.1 }), E.y + 21, E.y + 32, "next").svg +
-      box(text(F.mono, "NEXT STOP", E.x - 30, E.y + 48, tag.size, { anchor: "end", tracking: tag.tracking, opacity: tag.opacity }), E.y + 41, E.y + 48, "next-tag").svg
-  )
-);
-
-const legend = [["platforms", "PLATFORMS"], ["commerce", "COMMERCE"], ["tools", "TOOLS"]];
-const swatch = 22, gap = 8, between = 22;
-const widths = legend.map(([, l]) => swatch + gap + measure(F.mono, l, 10, 1.3));
-let lx = 1200 - M - widths.reduce((a, b) => a + b, 0) - between * (legend.length - 1);
-let legendSvg = "";
-legend.forEach(([k, l], i) => {
-  legendSvg += `<path d="M${(lx + 2.5).toFixed(1)} 344.5H${(lx + swatch - 2.5).toFixed(1)}" stroke="${C[k]}" stroke-width="5" stroke-linecap="round"/>`;
-  legendSvg += box(text(F.mono, l, lx + swatch + gap, 348, 10, { tracking: 1.3, opacity: 0.68 }), 340, 348, "legend " + l).svg;
-  lx += widths[i] + between;
-});
-parts.push(delayed("fade", T.legend, legendSvg));
-
-const clash = [];
-for (let i = 0; i < boxes.length; i++)
-  for (let j = i + 1; j < boxes.length; j++) {
-    const a = boxes[i], b = boxes[j];
-    if (a.name.startsWith("cue") && b.name.startsWith("cue")) continue;
-    if (a.x0 < b.x1 + 8 && b.x0 < a.x1 + 8 && a.y0 < b.y1 + 2 && b.y0 < a.y1 + 2) clash.push(`${a.name} / ${b.name}`);
-  }
-const outside = boxes.filter(b => b.x0 < M - 4 || b.x1 > 1200 - M + 4).map(b => b.name);
-
-const css = `
-.a{animation-fill-mode:both;animation-timing-function:cubic-bezier(.2,.7,.2,1)}
-.fade{animation-name:fade;animation-duration:.6s}
-.key{animation:key .01s step-start both}
-.caret{animation-name:caret;animation-timing-function:step-end;animation-fill-mode:both}
-.blink{animation:blink 1.05s step-end infinite}
-.pop{animation-name:pop;animation-duration:.55s;animation-timing-function:cubic-bezier(.34,1.56,.64,1);transform-box:fill-box;transform-origin:center}
-.draw{stroke-dasharray:1 1;animation-name:draw;animation-timing-function:linear}
-.ripple{opacity:0;animation:ripple 1.3s cubic-bezier(0,0,.2,1) both;transform-box:fill-box;transform-origin:center}
-.spin{animation:spin 16s linear infinite;transform-box:fill-box;transform-origin:center}
-.pulse{animation:pulse 2.4s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
-.ping{animation:ping 2.2s cubic-bezier(0,0,.2,1) infinite;transform-box:fill-box;transform-origin:center}
-.bob{animation:bob 1.8s ease-in-out infinite}
-@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-@keyframes key{from{opacity:0}to{opacity:1}}
-@keyframes caret{${caretFrames.join("")}}
-@keyframes blink{50%{opacity:0}}
-@keyframes pop{from{transform:scale(0)}to{transform:scale(1)}}
-@keyframes draw{0%{stroke-dashoffset:1;stroke-opacity:0}1%{stroke-opacity:1}100%{stroke-dashoffset:0;stroke-opacity:1}}
-@keyframes ripple{0%{opacity:0;transform:scale(1)}15%{opacity:.4}100%{opacity:0;transform:scale(2.6)}}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes pulse{50%{transform:scale(1.2)}}
-@keyframes ping{0%{opacity:.55;transform:scale(1)}100%{opacity:0;transform:scale(3.2)}}
-@keyframes bob{50%{transform:translateY(3px)}}
-@media (prefers-reduced-motion:reduce){*{animation:none!important}.train,.ripple,.caret{display:none}}
+  const css = `
+.a{animation-fill-mode:backwards;animation-timing-function:${ease}}
+.giant{animation-name:giant;animation-duration:1.4s;animation-delay:.05s;transform-box:fill-box}
+.photo{animation-name:photo;animation-duration:1.6s;animation-delay:.15s;transform-box:fill-box;transform-origin:50% 100%}
+.line{animation-name:line;animation-duration:1.2s;transform-box:fill-box}
+.rise{animation-name:rise;animation-duration:1.1s}
+.g path{opacity:0;animation-duration:${sec(cycle)};animation-timing-function:step-end;animation-iteration-count:infinite}
+.glow{animation:pulse 7s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+@keyframes giant{from{opacity:0;transform:translateY(6%)}}
+@keyframes photo{from{transform:translateY(7%) scale(1.06)}}
+@keyframes line{from{transform:translateY(110%)}}
+@keyframes rise{from{opacity:0;transform:translateY(22px)}}
+@keyframes pulse{50%{opacity:.78;transform:scale(1.05)}}
+${[...windows.values()].join("\n")}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}.w0 .f{opacity:1}}
 `;
 
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
-<title id="title">Deneth Raveesha · Full-stack Developer · Sri Lanka</title>
-<desc id="desc">Deneth Raveesha, full-stack developer based in Sri Lanka. I design and build complete web products. A transit map of my work: BizUpward and REM Nexus on the platforms line, WingZ Topup and its fulfilment API on the commerce line, VPS Manager and Zipizy on the tools line. Every line arrives at the next stop: your project.</desc>
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="title desc">
+<title id="title">Deneth Raveesha · Full-stack developer · Sri Lanka</title>
+<desc id="desc">Deneth Raveesha, full-stack developer based in Sri Lanka. From idea to interface. From code to the server it runs on. Behind the name, a giant word changes letter by letter: developer, full-stack, builder.</desc>
 <style>${css}</style>
-<rect x=".5" y=".5" width="1199" height="399" rx="18" fill="${C.paper}" stroke="${C.edge}"/>
-<g fill="${C.ink}">
-${parts.join("\n")}
+<defs>
+<clipPath id="frame"><rect width="${W}" height="${H}" rx="18"/></clipPath>
+<linearGradient id="giant" x1="0" y1="${giant.top}" x2="0" y2="${baseline.toFixed(1)}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e3161f"/><stop offset=".46" stop-color="#a10f19"/><stop offset=".92" stop-color="#5a080e" stop-opacity="0"/></linearGradient>
+<radialGradient id="glow"><stop offset="0" stop-color="#e61420" stop-opacity=".55"/><stop offset=".62" stop-color="#e61420" stop-opacity="0"/></radialGradient>
+<linearGradient id="fade" x1="0" y1="${H * 0.64}" x2="0" y2="${H * 0.98}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${C.bg}" stop-opacity="0"/><stop offset="1" stop-color="${C.bg}"/></linearGradient>
+</defs>
+<g clip-path="url(#frame)">
+<rect width="${W}" height="${H}" fill="${C.bg}"/>
+<g class="a giant"><g class="g" fill="url(#giant)">
+${words}
+</g></g>
+<circle class="glow" cx="${Math.round(W * 0.61)}" cy="${Math.round(H * 0.42)}" r="${Math.round(H * 0.85)}" fill="url(#glow)" style="mix-blend-mode:screen"/>
+${portrait}
+<rect y="${H * 0.64}" width="${W}" height="${H * 0.36}" fill="url(#fade)"/>
+<g fill="${C.text}">
+${lines.join("\n")}
+${intro(0, `<path d="${label.d}"/>`)}
+${intro(1, `<rect x="${M}" y="${ruleY}" width="40" height="2" fill="${C.red}"/>`)}
+${intro(2, tagline.map(t => `<path d="${t.d}"/>`).join(""))}
+${intro(4, `${pin}<path d="${whereText}"/><path fill="${C.muted}" d="${time.d}"/>`)}
 </g>
+</g>
+<rect x=".5" y=".5" width="${W - 1}" height="${H - 1}" rx="17.5" fill="none" stroke="${C.edge}"/>
 </svg>
 `;
-fs.writeFileSync(out, svg);
-console.log(JSON.stringify({ nameSize: S, typedBy: +roleTyped.end.toFixed(2), arrival: +arrival.toFixed(2), bytes: svg.length, clash, outside }));
+  fs.writeFileSync(out, svg);
+  console.log(JSON.stringify({ size: Math.round(size), wdths, cap: Math.round(cap), photo: withPhoto, bytes: svg.length }));
+}
+
+main();
